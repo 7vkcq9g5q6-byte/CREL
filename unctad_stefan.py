@@ -50,6 +50,24 @@ def parse_args() -> argparse.Namespace:
         help="Name of the target column to forecast.",
     )
     parser.add_argument(
+        "--target-file",
+        type=str,
+        default=os.environ.get("UNCTAD_TARGET_FILE", ""),
+        help="Optional separate CSV containing the target series to merge.",
+    )
+    parser.add_argument(
+        "--target-file-date-col",
+        type=str,
+        default=os.environ.get("UNCTAD_TARGET_FILE_DATE_COL", "date"),
+        help="Date column name inside the target CSV (if --target-file is provided).",
+    )
+    parser.add_argument(
+        "--target-file-value-col",
+        type=str,
+        default=os.environ.get("UNCTAD_TARGET_FILE_VALUE_COL", "target"),
+        help="Value column name inside the target CSV (if --target-file is provided).",
+    )
+    parser.add_argument(
         "--save-preprocessed",
         type=str,
         default=os.environ.get("UNCTAD_SAVE_PREPROCESSED", ""),
@@ -85,9 +103,14 @@ CSV_PATH = Path(ARGS.input).expanduser()
 DATE_COL = ARGS.date_col
 TARGET_COL = ARGS.target_col
 TEST_SIZE = ARGS.test_size
+TARGET_FILE = Path(ARGS.target_file).expanduser() if ARGS.target_file else None
+TARGET_FILE_DATE_COL = ARGS.target_file_date_col
+TARGET_FILE_VALUE_COL = ARGS.target_file_value_col
 
 if not CSV_PATH.exists():
     raise FileNotFoundError(f"Input CSV not found: {CSV_PATH}")
+if TARGET_FILE and not TARGET_FILE.exists():
+    raise FileNotFoundError(f"Target CSV not found: {TARGET_FILE}")
 
 if ARGS.no_plots:
     plt.switch_backend("Agg")
@@ -145,6 +168,29 @@ df = df[[DATE_COL] + feature_cols + [TARGET_COL]]
 # Ensure numeric dtypes for features/target
 for c in feature_cols + [TARGET_COL]:
     df[c] = pd.to_numeric(df[c], errors="coerce")
+
+# If target column missing and an external target file is provided, merge it.
+if TARGET_COL not in df.columns:
+    if not TARGET_FILE:
+        raise ValueError(
+            f"Target column '{TARGET_COL}' not found in {CSV_PATH}. "
+            "Provide --target-file or ensure the target column is present."
+        )
+    target_df = pd.read_csv(TARGET_FILE)
+    target_df[TARGET_FILE_DATE_COL] = pd.to_datetime(
+        target_df[TARGET_FILE_DATE_COL], errors="coerce"
+    )
+    target_df = target_df.dropna(subset=[TARGET_FILE_DATE_COL])
+    target_df = target_df.rename(
+        columns={TARGET_FILE_VALUE_COL: TARGET_COL, TARGET_FILE_DATE_COL: DATE_COL}
+    )
+    target_df[TARGET_COL] = pd.to_numeric(target_df[TARGET_COL], errors="coerce")
+    target_df = target_df[[DATE_COL, TARGET_COL]].dropna(subset=[TARGET_COL])
+    df = df.merge(target_df, on=DATE_COL, how="inner")
+    print(
+        f"[Info] Merged features with target file. Final row count after merge: {len(df)}"
+    )
+    feature_cols = [c for c in df.columns if c not in [DATE_COL, TARGET_COL]]
 
 # Drop rows with missing target; (features with NaN will be handled by interpolation or dropped later)
 df = df.dropna(subset=[TARGET_COL]).reset_index(drop=True)
